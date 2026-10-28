@@ -40,15 +40,19 @@ void play_queue_init(void)
 
 void play_queue_append(struct track_info *ti, void *opaque)
 {
-	struct simple_track *t = simple_track_new(ti);
+	if (!ti)
+		return;
 
+	struct simple_track *t = simple_track_new(ti);
 	editable_add(&pq_editable, t);
 }
 
 void play_queue_prepend(struct track_info *ti, void *opaque)
 {
-	struct simple_track *t = simple_track_new(ti);
+	if (!ti)
+		return;
 
+	struct simple_track *t = simple_track_new(ti);
 	editable_add_before(&pq_editable, t);
 }
 
@@ -78,4 +82,19 @@ int play_queue_for_each(int (*cb)(void *data, struct track_info *ti),
 			break;
 	}
 	return rc;
+}
+
+unsigned int play_queue_total_time(void)
+{
+	return pq_editable.total_time;
+}
+
+int queue_needs_redraw(void)
+{
+	return pq_editable.shared->win->changed;
+}
+
+void queue_post_update(void)
+{
+	pq_editable.shared->win->changed = 0;
 }

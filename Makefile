@@ -7,7 +7,7 @@ _ver1	= $(shell git describe --tags $(REV) 2>/dev/null)
 # SHA1
 _ver2	= $(shell git rev-parse --verify --short $(REV) 2>/dev/null)
 # hand-made
-_ver3	= v2.10.0
+_ver3	= v2.13.0
 
 VERSION	= $(or $(_ver0),$(_ver1),$(_ver2),$(_ver3))
 
@@ -17,9 +17,6 @@ all: main plugins man
 include scripts/lib.mk
 
 CFLAGS += -D_FILE_OFFSET_BITS=64
-
-FFMPEG_CFLAGS += $(shell pkg-config --cflags libswresample)
-FFMPEG_LIBS += $(shell pkg-config --libs libswresample)
 
 CMUS_LIBS = $(PTHREAD_LIBS) $(NCURSES_LIBS) $(ICONV_LIBS) $(DL_LIBS) $(DISCID_LIBS) \
 			-lm $(COMPAT_LIBS) $(LIBSYSTEMD_LIBS)
@@ -40,9 +37,9 @@ cmus-y := \
 	comment.o convert.lo cue.o cue_utils.o debug.o discid.o editable.o expr.o \
 	filters.o format_print.o gbuf.o glob.o help.o history.o http.o id3.o input.o \
 	job.o keys.o keyval.o lib.o load_dir.o locking.o mergesort.o misc.o options.o \
-	output.o pcm.o player.o play_queue.o pl.o rbtree.o read_wrapper.o search_mode.o \
-	search.o server.o spawn.o tabexp_file.o tabexp.o track_info.o track.o tree.o \
-	uchar.o u_collate.o ui_curses.o window.o worker.o xstrjoin.o
+	output.o pcm.o player.o play_queue.o pl.o pl_env.o rbtree.o read_wrapper.o \
+	search_mode.o search.o server.o spawn.o tabexp_file.o tabexp.o track_info.o \
+	track.o tree.o uchar.o u_collate.o ui_curses.o window.o worker.o xstrjoin.o
 
 cmus-$(CONFIG_MPRIS) += mpris.o
 
@@ -125,7 +122,7 @@ ip/flac.so: $(flac-objs) $(libcmus-y)
 	$(call cmd,ld_dl,$(FLAC_LIBS))
 
 ip/mad.so: $(mad-objs) $(libcmus-y)
-	$(call cmd,ld_dl,$(MAD_LIBS) $(ICONV_LIBS))
+	$(call cmd,ld_dl,-lm $(MAD_LIBS) $(ICONV_LIBS))
 
 ip/mikmod.so: $(mikmod-objs) $(libcmus-y)
 	$(call cmd,ld_dl,$(MIKMOD_LIBS))
@@ -140,7 +137,7 @@ ip/mpc.so: $(mpc-objs) $(libcmus-y)
 	$(call cmd,ld_dl,$(MPC_LIBS))
 
 ip/vorbis.so: $(vorbis-objs) $(libcmus-y)
-	$(call cmd,ld_dl,$(VORBIS_LIBS))
+	$(call cmd,ld_dl,-lm $(VORBIS_LIBS))
 
 ip/opus.so: $(opus-objs) $(libcmus-y)
 	$(call cmd,ld_dl,$(OPUS_LIBS))
@@ -161,7 +158,7 @@ ip/ffmpeg.so: $(ffmpeg-objs) $(libcmus-y)
 	$(call cmd,ld_dl,$(FFMPEG_LIBS))
 
 ip/cue.so: $(cue-objs) $(libcmus-y)
-	$(call cmd,ld_dl,$(CUE_LIBS))
+	$(call cmd,ld_dl,-lm)
 
 ip/vtx.so: $(vtx-objs) $(libcmus-y)
 	$(call cmd,ld_dl,$(VTX_LIBS))
@@ -180,6 +177,7 @@ ao-objs			:= op/ao.lo
 coreaudio-objs		:= op/coreaudio.lo
 waveout-objs		:= op/waveout.lo
 roar-objs               := op/roar.lo
+aaudio-objs		:= op/aaudio.lo
 
 op-$(CONFIG_PULSE)	+= op/pulse.so
 op-$(CONFIG_ALSA)	+= op/alsa.so
@@ -192,6 +190,7 @@ op-$(CONFIG_COREAUDIO)	+= op/coreaudio.so
 op-$(CONFIG_AO)		+= op/ao.so
 op-$(CONFIG_WAVEOUT)	+= op/waveout.so
 op-$(CONFIG_ROAR)       += op/roar.so
+op-$(CONFIG_AAUDIO)	+= op/aaudio.so
 
 $(pulse-objs): CFLAGS		+= $(PULSE_CFLAGS)
 $(alsa-objs): CFLAGS		+= $(ALSA_CFLAGS)
@@ -204,12 +203,13 @@ $(ao-objs):   CFLAGS		+= $(AO_CFLAGS)
 $(coreaudio-objs): CFLAGS	+= $(COREAUDIO_CFLAGS)
 $(waveout-objs): CFLAGS 	+= $(WAVEOUT_CFLAGS)
 $(roar-objs): CFLAGS		+= $(ROAR_CFLAGS)
+$(aaudio-objs): CFLAGS		+= $(AAUDIO_CFLAGS)
 
 op/pulse.so: $(pulse-objs) $(libcmus-y)
 	$(call cmd,ld_dl,$(PULSE_LIBS))
 
 op/alsa.so: $(alsa-objs) $(libcmus-y)
-	$(call cmd,ld_dl,$(ALSA_LIBS))
+	$(call cmd,ld_dl,$(ALSA_LIBS) -lm)
 
 op/jack.so: $(jack-objs) $(libcmus-y)
 	$(call cmd,ld_dl,$(JACK_LIBS) $(SAMPLERATE_LIBS))
@@ -237,6 +237,9 @@ op/waveout.so: $(waveout-objs) $(libcmus-y)
 
 op/roar.so: $(roar-objs) $(libcmus-y)
 	$(call cmd,ld_dl,$(ROAR_LIBS))
+
+op/aaudio.so: $(aaudio-objs) $(libcmus-y)
+	$(call cmd,ld_dl,$(AAUDIO_LIBS))
 # }}}
 
 # man {{{

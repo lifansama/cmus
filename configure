@@ -44,7 +44,8 @@ check_cflags()
 {
 	check_cc_flag -pipe -Wall -Wshadow -Wcast-align -Wpointer-arith \
 		-Wwrite-strings -Wundef -Wmissing-prototypes -Wredundant-decls \
-		-Wextra -Wno-sign-compare -Wformat-security
+		-Wextra -Wno-sign-compare -Wformat-security \
+		-D_DEFAULT_SOURCE -D_XOPEN_SOURCE=600
 
 	for i in -Wold-style-definition \
 		-Wno-pointer-sign \
@@ -74,6 +75,8 @@ check_coreaudio()
 }
 
 wcwidth_code="
+#define _DEFAULT_SOURCE
+#define _XOPEN_SOURCE 600
 #include <wchar.h>
 
 /* wchar_t must be 4 bytes to support full unicode */
@@ -156,13 +159,17 @@ check_rtsched()
 	return 0
 }
 
-ncurses_code="
+ncurses_include="
 #if defined(__sun__) || defined(__CYGWIN__)
 #include <termios.h>
 #include <ncurses.h>
 #else
 #include <curses.h>
 #endif
+"
+
+ncurses_code="
+$ncurses_include
 
 int main(void)
 {
@@ -189,7 +196,7 @@ check_ncurses()
 	msg_checking "for working ncurses setup"
 	for flag in "" "-I/usr/include/ncurses" "-I/usr/include/ncursesw"
 	do
-		if try_compile_link "$ncurses_code" $flag $NCURSES_LIBS
+		if try_compile_link "$ncurses_code" $NCURSES_CFLAGS $flag $NCURSES_LIBS
 		then
 			NCURSES_CFLAGS="$NCURSES_CFLAGS $flag"
 			msg_result yes
@@ -208,6 +215,16 @@ check_ncurses()
 
 	check_function "use_default_colors" $NCURSES_CFLAGS $NCURSES_LIBS
 	HAVE_USE_DEFAULT_COLORS=`test $? -ne 0 ; echo $?`
+
+	msg_checking "for A_ITALIC"
+	if try_compile_link "$ncurses_include int main(int argc, char *argv[]) { unsigned long x = A_ITALIC; return !!x; }" $NCURSES_CFLAGS $NCURSES_LIBS
+	then
+		msg_result yes
+		HAVE_ITALIC="1"
+	else
+		msg_result no
+		HAVE_ITALIC="0"
+	fi
 
 	return 0
 }
@@ -315,7 +332,9 @@ check_vorbis()
 
 check_libsystemd()
 {
-	pkg_config LIBSYSTEMD "libsystemd" || pkg_config LIBSYSTEMD "libelogind >= 239.3"
+	pkg_config LIBSYSTEMD "libsystemd" || pkg_config LIBSYSTEMD "libelogind >= 239.3" || {
+		pkg_config LIBSYSTEMD "basu" && CFLAGS="${CFLAGS} -DCONFIG_MPRIS_BASU"
+	}
 	return $?
 }
 
@@ -434,42 +453,36 @@ check_roar()
 
 check_mp4()
 {
-	USE_MPEG4IP=1
-	if check_header mp4v2/mp4v2.h
+	pkg_config MP4 "mp4v2 faad2" "" "-lmp4v2 -lfaad -lm" || return $?
+	USE_MPEG4IP=0
+	if ! check_header mp4v2/mp4v2.h -std=c11 $MP4_CFLAGS
 	then
-		USE_MPEG4IP=0
-	else
-		check_header mp4.h || return $?
+		# couldn't find the v2 header, try falling back to mp4.h
+		USE_MPEG4IP=1
+		check_header mp4.h $MP4_CFLAGS || return $?
 	fi
-	check_header neaacdec.h &&
-	check_library MP4 "" "-lmp4v2 -lfaad -lm"
+	check_header neaacdec.h $MP4_CFLAGS
 	return $?
 }
 
 check_aac()
 {
-	check_header neaacdec.h &&
-	check_library AAC "" "-lfaad -lm"
+	pkg_config AAC faad2 "" "-lfaad -lm" || return $?
+	check_header neaacdec.h $AAC_CFLAGS
 	return $?
 }
 
 check_ffmpeg()
 {
-	HAVE_FFMPEG_AVCODEC_H=y
-	pkg_config FFMPEG "libavformat libavcodec" || return $?
-	if check_header "libavcodec/avcodec.h" $FFMPEG_CFLAGS
-	then
-		HAVE_FFMPEG_AVCODEC_H=n
-	else
-		check_header "ffmpeg/avcodec.h" $FFMPEG_CFLAGS || return $?
-	fi
+	pkg_config FFMPEG "libavformat libavcodec libswresample libavutil" || return $?
+	# check the existence of specific headers since they've been renamed before
+	check_header "libavformat/avformat.h" $FFMPEG_CFLAGS || return $?
+	check_header "libavcodec/avcodec.h" $FFMPEG_CFLAGS || return $?
+	check_header "libswresample/swresample.h" $FFMPEG_CFLAGS || return $?
+	check_header "libavutil/avutil.h" $FFMPEG_CFLAGS || return $?
 	# ffmpeg api changes so frequently that it is best to compile the module
 	libs="$LDDLFLAGS $FFMPEG_LIBS"
 	cflags="$SOFLAGS $FFMPEG_CFLAGS"
-	if test "$HAVE_FFMPEG_AVCODEC_H" = y
-	then
-		cflags="$cflags -DHAVE_FFMPEG_AVCODEC_H"
-	fi
 	topdir=`dirname "$0"`
 	ffmpeg_code=`cat "$topdir"/ip/ffmpeg.c | sed 's/\\\n//g'`
 	msg_checking "for successful build of ffmpeg.c"
@@ -482,14 +495,47 @@ check_ffmpeg()
 	return 1
 }
 
+aaudio_code="
+#include <aaudio/AAudio.h>
+int main() {
+	// ensure basic aaudio support
+	if (__builtin_available(android 26, *)) {
+		AAudioStreamBuilder *bld;
+		AAudio_createStreamBuilder(&bld);
+
+		// ensure we have at least api 32 headers
+		if (__builtin_available(android 32, *)) {
+			AAudioStreamBuilder_setChannelMask(bld, AAUDIO_CHANNEL_9POINT1POINT6);
+		}
+	}
+	return 0;
+}
+"
+
+check_aaudio()
+{
+	check_header aaudio/AAudio.h || return $?
+	check_library AAUDIO "-D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__ -Werror=unguarded-availability" "-Wl,--no-as-needed -laaudio" || return $?
+
+	msg_checking "for working aaudio api 32 linkage"
+	if try_compile_link "$aaudio_code" $AAUDIO_CFLAGS $AAUDIO_LIBS
+	then
+		msg_result yes
+		return 0
+	fi
+	msg_result no
+	return 1
+}
+
 check_string_function()
 {
 	msg_checking "for function $1"
 	string_function_code="
+#define _DEFAULT_SOURCE
+#define _XOPEN_SOURCE 600
 #include <string.h>
-int main() {
-	return $1;
-}
+int (*ptr)() = (int (*)()) &$1;
+int main() { return 0; }
 "
 	if try_compile_link "$string_function_code"
 	then
@@ -522,11 +568,13 @@ Options:
   datadir         Read-only data         [\$prefix/share]
   libdir          Libraries              [\$prefix/lib]
   mandir          Man pages              [\$datadir/man]
-  exampledir      Examples               [\$datadir/doc/cmus/examples]
+  docdir          Other documentation    [\$datadir/doc/cmus]
+  exampledir      Examples               [\$docdir/examples]
   DEBUG           Debugging level (0-2)  [$DEBUG]
 
 Optional Features: y/n
   CONFIG_AAC            AAC (.aac, audio/aac, audio/aacp)               [auto]
+  CONFIG_AAUDIO         Android 8.0+ native audio output                [auto]
   CONFIG_ALSA           ALSA                                            [auto]
   CONFIG_AO             Libao cross-platform audio library              [auto]
   CONFIG_ARTS           ARTS                                            [auto]
@@ -579,7 +627,8 @@ var_default bindir "${prefix}/bin"
 var_default datadir "${prefix}/share"
 var_default libdir "${prefix}/lib"
 var_default mandir "${datadir}/man"
-var_default exampledir "${datadir}/doc/cmus/examples"
+var_default docdir "${datadir}/doc/cmus"
+var_default exampledir "${docdir}/examples"
 
 check check_cc
 check check_host_cc
@@ -630,6 +679,7 @@ check check_sndio      CONFIG_SNDIO
 check check_sun        CONFIG_SUN
 check check_waveout    CONFIG_WAVEOUT
 check check_roar       CONFIG_ROAR
+check check_aaudio     CONFIG_AAUDIO
 
 # discid is only needed if at least one cdda plugin is active
 test -z "$CONFIG_DISCID" && CONFIG_DISCID=a
@@ -654,7 +704,7 @@ config_header config/tremor.h CONFIG_TREMOR
 config_header config/modplug.h MODPLUG_API_8
 config_header config/mpc.h MPC_SV8
 config_header config/mp4.h USE_MPEG4IP
-config_header config/curses.h HAVE_RESIZETERM HAVE_USE_DEFAULT_COLORS
+config_header config/curses.h HAVE_RESIZETERM HAVE_USE_DEFAULT_COLORS HAVE_ITALIC
 config_header config/ffmpeg.h HAVE_FFMPEG_AVCODEC_H USE_FALLBACK_IP
 config_header config/utils.h HAVE_BYTESWAP_H
 config_header config/iconv.h HAVE_ICONV
@@ -664,13 +714,13 @@ config_header config/xmalloc.h HAVE_STRDUP HAVE_STRNDUP
 
 CFLAGS="${CFLAGS} -DHAVE_CONFIG"
 
-makefile_vars bindir datadir libdir mandir exampledir
+makefile_vars bindir datadir libdir mandir docdir exampledir
 makefile_vars \
 	CONFIG_AAC CONFIG_ALSA CONFIG_AO CONFIG_ARTS CONFIG_CDIO \
 	CONFIG_COREAUDIO CONFIG_CUE CONFIG_FFMPEG CONFIG_FLAC CONFIG_JACK \
 	CONFIG_MAD CONFIG_MIKMOD CONFIG_MODPLUG CONFIG_MP4 CONFIG_MPC \
 	CONFIG_MPRIS CONFIG_OPUS CONFIG_OSS CONFIG_PULSE CONFIG_ROAR \
 	CONFIG_SAMPLERATE CONFIG_SNDIO CONFIG_SUN CONFIG_VORBIS CONFIG_VTX \
-	CONFIG_WAV CONFIG_WAVEOUT CONFIG_WAVPACK CONFIG_BASS
+	CONFIG_WAV CONFIG_WAVEOUT CONFIG_WAVPACK CONFIG_BASS CONFIG_AAUDIO
 
 generate_config_mk

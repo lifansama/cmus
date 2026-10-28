@@ -26,7 +26,7 @@ __cleanup()
 		echo "DEBUG_CONFIGURE=y, not removing temporary files"
 		ls .tmp-[0-9]*-*
 	else
-		rm -f .tmp-[0-9]*-*
+		rm -rf .tmp-[0-9]*-*
 	fi
 }
 
@@ -173,7 +173,7 @@ path_find()
 show_usage()
 {
 	cat <<EOF
-Usage ./configure [-f FILE] [OPTION=VALUE]...
+Usage ./configure [-f FILE] [--prefix|bindir|datadir|libdir|mandir|docdir=VALUE] [OPTION=VALUE]...
 
   -f FILE         Read OPTION=VALUE list from FILE (sh script)
 $USAGE

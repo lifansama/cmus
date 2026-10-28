@@ -54,16 +54,16 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <dirent.h>
+#include <unistd.h>
 
 static struct history cmd_history;
 static char *cmd_history_filename;
 static char *history_search_text = NULL;
-static int arg_expand_cmd = -1;
 static int mute_vol_l = 0, mute_vol_r = 0;
 
 /* view {{{ */
 
-void view_clear(int view)
+void view_clear(int view, int explicit_view)
 {
 	switch (view) {
 	case TREE_VIEW:
@@ -75,7 +75,10 @@ void view_clear(int view)
 		lib_clear_store();
 		break;
 	case PLAYLIST_VIEW:
-		pl_clear();
+		if (explicit_view)
+			pl_clear_marked_pl();
+		else
+			pl_clear_selected_pl();
 		break;
 	case QUEUE_VIEW:
 		worker_remove_jobs_by_type(JOB_TYPE_QUEUE);
@@ -378,12 +381,12 @@ static void cmd_clear(char *arg)
 		error_msg("too many arguments\n");
 		return;
 	}
-	view_clear(flag_to_view(flag));
+	view_clear(flag_to_view(flag), flag != 0);
 }
 
 static void cmd_load(char *arg)
 {
-	int flag = parse_flags((const char **)&arg, "lp");
+	int flag = parse_flags((const char **)&arg, "l");
 
 	if (flag == -1)
 		return;
@@ -772,12 +775,21 @@ static void cmd_colorscheme(char *arg)
 {
 	char filename[512];
 
+	/* check that the theme at least exists before resetting the colors */
 	snprintf(filename, sizeof(filename), "%s/%s.theme", cmus_config_dir, arg);
-	if (source_file(filename) == -1) {
+	if (access(filename, R_OK) != 0) {
 		snprintf(filename, sizeof(filename), "%s/%s.theme", cmus_data_dir, arg);
-		if (source_file(filename) == -1)
+		if (access(filename, R_OK) != 0) {
 			error_msg("sourcing %s: %s", filename, strerror(errno));
+			return;
+		}
 	}
+
+	/* so incomplete themes don't leave behind old colors */
+	colors_reset();
+
+	if (source_file(filename) == -1)
+		error_msg("sourcing %s: %s", filename, strerror(errno));
 }
 
 /*
@@ -1200,14 +1212,23 @@ err:
 static void cmd_mute(char *arg)
 {
 	int l = 0, r = 0;
+	int *vl, *vr;
 
-	if (volume_l == 0 && volume_r == 0) {
+	if (soft_vol) {
+		vl = &soft_vol_l;
+		vr = &soft_vol_r;
+	} else {
+		vl = &volume_l;
+		vr = &volume_r;
+	}
+
+	if (*vl == 0 && *vr == 0) {
 		// unmute
 		l = mute_vol_l;
 		r = mute_vol_r;
 	} else {
-		mute_vol_l = volume_l;
-		mute_vol_r = volume_r;
+		mute_vol_l = *vl;
+		mute_vol_r = *vr;
 	}
 
 	int rc = player_set_vol(l, 0, r, 0);
@@ -1270,8 +1291,12 @@ static void cmd_prev_view(char *arg)
 
 static void cmd_left_view(char *arg)
 {
+	int flag = parse_flags((const char **)&arg, "n");
+
 	if (cur_view == TREE_VIEW) {
-		set_view(HELP_VIEW);
+		if (flag != 'n') {
+			set_view(HELP_VIEW);
+		}
 	} else {
 		set_view(cur_view - 1);
 	}
@@ -1279,8 +1304,12 @@ static void cmd_left_view(char *arg)
 
 static void cmd_right_view(char *arg)
 {
+	int flag = parse_flags((const char **)&arg, "n");
+
 	if (cur_view == HELP_VIEW) {
-		set_view(TREE_VIEW);
+		if (flag != 'n') {
+			set_view(TREE_VIEW);
+		}
 	} else {
 		set_view(cur_view + 1);
 	}
@@ -1335,6 +1364,15 @@ static void cmd_pl_rename(char *arg)
 		pl_rename_selected_pl(arg);
 	else
 		info_msg(":pl-rename only works in view 3");
+}
+
+static void cmd_pl_delete(char *arg)
+{
+	int flag = parse_flags((const char **)&arg, "a");
+	if (flag == 'a')
+		pl_delete_all();
+	else
+		pl_delete_by_name(arg);
 }
 
 static void cmd_version(char *arg)
@@ -2622,12 +2660,13 @@ struct command commands[] = {
 	{ "player-prev-album",     cmd_p_prev_album,     0, 0,  NULL,                 0, 0          },
 	{ "player-stop",           cmd_p_stop,           0, 0,  NULL,                 0, 0          },
 	{ "prev-view",             cmd_prev_view,        0, 0,  NULL,                 0, 0          },
-	{ "left-view",             cmd_left_view,        0, 0,  NULL,                 0, 0          },
-	{ "right-view",            cmd_right_view,       0, 0,  NULL,                 0, 0          },
+	{ "left-view",             cmd_left_view,        0, 1,  NULL,                 0, 0          },
+	{ "right-view",            cmd_right_view,       0, 1,  NULL,                 0, 0          },
 	{ "pl-create",             cmd_pl_create,        1, -1, NULL,                 0, 0          },
 	{ "pl-export",             cmd_pl_export,        1, -1, NULL,                 0, 0          },
 	{ "pl-import",             cmd_pl_import,        0, -1, NULL,                 0, 0          },
 	{ "pl-rename",             cmd_pl_rename,        1, -1, NULL,                 0, 0          },
+	{ "pl-delete",             cmd_pl_delete,        1, 1,  NULL,                 0, 0          },
 	{ "push",                  cmd_push,             0, -1, expand_commands,      0, 0          },
 	{ "pwd",                   cmd_pwd,              0, 0,  NULL,                 0, 0          },
 	{ "raise-vte",             cmd_raise_vte,        0, 0,  NULL,                 0, 0          },
@@ -2839,7 +2878,6 @@ static void tab_expand(int direction)
 static void reset_tab_expansion(void)
 {
 	tabexp_reset();
-	arg_expand_cmd = -1;
 }
 
 static void cmdline_modified(void)
@@ -3154,10 +3192,10 @@ void commands_init(void)
 
 void commands_exit(void)
 {
-	view_clear(TREE_VIEW);
-	view_clear(SORTED_VIEW);
-	view_clear(PLAYLIST_VIEW);
-	view_clear(QUEUE_VIEW);
+	view_clear(TREE_VIEW, 1);
+	view_clear(SORTED_VIEW, 1);
+	view_clear(PLAYLIST_VIEW, 1);
+	view_clear(QUEUE_VIEW, 1);
 	history_save(&cmd_history);
 	history_free(&cmd_history);
 	free(cmd_history_filename);

@@ -41,6 +41,9 @@
 #include "debug.h"
 #include "discid.h"
 #include "mpris.h"
+#ifdef HAVE_CONFIG
+#include "config/curses.h"
+#endif
 
 #include <stdio.h>
 #include <errno.h>
@@ -73,12 +76,16 @@ int shuffle = 0;
 int follow = 0;
 int display_artist_sort_name;
 int smart_artist_sort = 1;
+int sort_albums_by_name = 0;
 int scroll_offset = 2;
 int rewind_offset = 5;
 int skip_track_info = 0;
+int ignore_duplicates = 0;
 int auto_expand_albums_follow = 1;
 int auto_expand_albums_search = 1;
 int auto_expand_albums_selcur = 1;
+int auto_hide_playlists_panel = 0;
+int auto_mark_selected_playlist = 0;
 int show_all_tracks = 1;
 int mouse = 0;
 int mpris = 1;
@@ -88,6 +95,9 @@ int stop_after_queue = 0;
 int tree_width_percent = 33;
 int tree_width_max = 0;
 int pause_on_output_change = 0;
+int block_key_paste = 1;
+int progress_bar = 1;
+int search_resets_position = 1;
 
 int colors[NR_COLORS] = {
 	-1,
@@ -101,29 +111,32 @@ int colors[NR_COLORS] = {
 	COLOR_BLUE,
 
 	COLOR_WHITE | BRIGHT,
+	COLOR_BLUE,
+	COLOR_WHITE | BRIGHT,
 	-1,
+
 	COLOR_YELLOW | BRIGHT,
 	COLOR_BLUE,
-
 	COLOR_YELLOW | BRIGHT,
 	COLOR_BLUE | BRIGHT,
+
 	-1,
 	COLOR_WHITE,
-
 	COLOR_YELLOW | BRIGHT,
 	COLOR_WHITE,
+
 	COLOR_BLACK,
 	COLOR_BLUE,
-
 	COLOR_WHITE | BRIGHT,
 	COLOR_BLUE,
+
 	COLOR_WHITE | BRIGHT,
 	-1,
-
 	-1,
 };
 
 int attrs[NR_ATTRS] = {
+	A_NORMAL,
 	A_NORMAL,
 	A_NORMAL,
 	A_NORMAL,
@@ -152,12 +165,16 @@ char *clipped_text_format = NULL;
 char *clipped_text_internal = NULL;
 char *current_format = NULL;
 char *current_alt_format = NULL;
+char *heading_album_format = NULL;
+char *heading_artist_format = NULL;
+char *heading_playlist_format = NULL;
 char *statusline_format = NULL;
 char *window_title_format = NULL;
 char *window_title_alt_format = NULL;
 char *id3_default_charset = NULL;
 char *icecast_default_charset = NULL;
 char *lib_add_filter = NULL;
+char **pl_env_vars;
 
 static void buf_int(char *buf, int val, size_t size)
 {
@@ -180,6 +197,7 @@ int parse_enum(const char *buf, int minval, int maxval, const char * const names
 {
 	long int tmp;
 	int i;
+	GBUF(names_buf);
 
 	if (str_to_int(buf, &tmp) == 0) {
 		if (tmp < minval || tmp > maxval)
@@ -195,7 +213,13 @@ int parse_enum(const char *buf, int minval, int maxval, const char * const names
 		}
 	}
 err:
-	error_msg("name or integer in range %d..%d expected", minval, maxval);
+	for (i = 0; names[i]; i++) {
+		if (i)
+			gbuf_add_str(&names_buf, ", ");
+		gbuf_add_str(&names_buf, names[i]);
+	}
+	error_msg("expected [%d..%d] or [%s]", minval, maxval, names_buf.buffer);
+	gbuf_free(&names_buf);
 	return 0;
 }
 
@@ -211,8 +235,11 @@ static int parse_bool(const char *buf, int *val)
 /* this is used as id in struct cmus_opt */
 enum format_id {
 	FMT_CLIPPED_TEXT,
-	FMT_CURRENT,
 	FMT_CURRENT_ALT,
+	FMT_CURRENT,
+	FMT_HEADING_ALBUM,
+	FMT_HEADING_ARTIST,
+	FMT_HEADING_PLAYLIST,
 	FMT_STATUSLINE,
 	FMT_PLAYLIST,
 	FMT_PLAYLIST_ALT,
@@ -238,25 +265,28 @@ static const struct {
 	[FMT_CLIPPED_TEXT]	= { "format_clipped_text"	, "…"							},
 	[FMT_CURRENT_ALT]	= { "altformat_current"		, " %F "						},
 	[FMT_CURRENT]		= { "format_current"		, " %a - %l%! - %n. %t%= %y "				},
+	[FMT_HEADING_ALBUM]	= { "format_heading_album"	, "%a - %l%= %y %{duration}"				},
+	[FMT_HEADING_ARTIST]	= { "format_heading_artist"	, "%a%= %{duration}"					},
+	[FMT_HEADING_PLAYLIST]	= { "format_heading_playlist"	, "%{?!panel?Playlist - }%{title}%= %{duration}    "	},
 	[FMT_STATUSLINE]	= { "format_statusline"		,
 		" %{status} %{?show_playback_position?%{position} %{?duration?/ %{duration} }?%{?duration?%{duration} }}"
-		"- %{total} %{?bpm>0?at %{bpm} BPM }"
-		"%{?volume>=0?vol: %{?lvolume!=rvolume?%{lvolume},%{rvolume} ?%{volume} }}"
+		"%{?bpm>0?at %{bpm} BPM }"
 		"%{?stream?buf: %{buffer} }"
 		"%{?show_current_bitrate & bitrate>=0? %{bitrate} kbps }"
-		"%="
-		"%{?repeat_current?repeat current?%{?play_library?%{playlist_mode} from %{?play_sorted?sorted }library?playlist}}"
-		" | %1{continue}%1{follow}%1{repeat}%1{shuffle} "
+		"%= "
+		"%{?repeat_current?repeat current?%{?play_library?%{?playlist_mode!=\"all\"?%{playlist_mode} from }%{?play_sorted?sorted }library?playlist}} | "
+		"%{?volume>=0?%{?lvolume!=rvolume?%{lvolume}%% %{rvolume}?%{volume}}%% | }"
+		"%1{continue}%1{follow}%1{repeat}%1{shuffle} "
 	},
-	[FMT_PLAYLIST_ALT]	= { "altformat_playlist"	, " %f%= %d "						},
+	[FMT_PLAYLIST_ALT]	= { "altformat_playlist"	, " %f%= %d %{?X!=0?%3X ?    }"				},
 	[FMT_PLAYLIST]		= { "format_playlist"		, " %-21%a %3n. %t%= %y %d %{?X!=0?%3X ?    }"		},
 	[FMT_PLAYLIST_VA]	= { "format_playlist_va"	, " %-21%A %3n. %t (%a)%= %y %d %{?X!=0?%3X ?    }"	},
 	[FMT_TITLE_ALT]		= { "altformat_title"		, "%f"							},
 	[FMT_TITLE]		= { "format_title"		, "%a - %l - %t (%y)"					},
-	[FMT_TRACKWIN_ALBUM]	= { "format_trackwin_album"	, " %l %= %{albumduration} "				},
+	[FMT_TRACKWIN_ALBUM]	= { "format_trackwin_album"	, " %l %= %y %{duration} "				},
 	[FMT_TRACKWIN_ALT]	= { "altformat_trackwin"	, " %f%= %d "						},
-	[FMT_TRACKWIN]		= { "format_trackwin"		, "%3n. %t%= %y %d "					},
-	[FMT_TRACKWIN_VA]	= { "format_trackwin_va"	, "%3n. %t (%a)%= %y %d "				},
+	[FMT_TRACKWIN]		= { "format_trackwin"		, "%3n. %t%= %d "					},
+	[FMT_TRACKWIN_VA]	= { "format_trackwin_va"	, "%3n. %t (%a)%= %d "					},
 	[FMT_TREEWIN]		= { "format_treewin"		, "  %l"						},
 	[FMT_TREEWIN_ARTIST]	= { "format_treewin_artist"	, "%a"							},
 
@@ -266,8 +296,11 @@ static const struct {
 	{ "pl_sort", "" },
 	{ "id3_default_charset", "ISO-8859-1" },
 	{ "icecast_default_charset", "ISO-8859-1" },
+	{ "pl_env_vars", "" },
 	{ NULL, NULL }
 };
+
+static int seen_pr1317_fmts = 0;
 
 /* callbacks for normal options {{{ */
 
@@ -384,10 +417,10 @@ static void get_output_plugin(void *data, char *buf, size_t size)
 static void set_output_plugin(void *data, const char *buf)
 {
 	if (ui_initialized) {
-		if (!soft_vol)
+		if (!soft_vol || pause_on_output_change)
 			mixer_close();
 		player_set_op(buf);
-		if (!soft_vol)
+		if (!soft_vol || pause_on_output_change)
 			mixer_open();
 	} else {
 		/* must set it later manually */
@@ -505,9 +538,91 @@ static void set_tree_width_max(void *data, const char *buf)
 	update_size();
 }
 
+/* get_pl_env_vars converts the pl_env_vars array into a comma-separated list */
+static void get_pl_env_vars(void *data, char *buf, size_t size)
+{
+	if (!pl_env_vars) {
+		strscpy(buf, "", size);
+		return;
+	}
+	char *p = buf;
+	size_t r = size - 1;
+	for (char **x = pl_env_vars; *x; x++) {
+		if (x != pl_env_vars) {
+			if (!--r)
+				return; /* overflow */
+			*p++ = ',';
+		}
+		size_t l = strlen(*x);
+		if (!(r -= l))
+			return; /* overflow */
+		strcpy(p, *x);
+		p += l;
+	}
+	*p = '\0';
+}
+
+/* set_pl_env_vars splits the pl_env_vars config into the pl_env_vars array */
+static void set_pl_env_vars(void *data, const char *buf)
+{
+	if (pl_env_vars) {
+		free(*pl_env_vars);
+		free(pl_env_vars);
+	}
+	if (!*buf) {
+		pl_env_vars = NULL;
+	}
+	size_t n = 1;
+	for (const char *x = buf; *x; x++) {
+		if (*x == ',') {
+			n++;
+		}
+	}
+	char **a = pl_env_vars = xnew(char*, n+1);
+	for (char *x = *a++ = xstrdup(buf); *x; x++) {
+		if (*x == ',') {
+			*a++ = x+1;
+			*x = '\0';
+		}
+	}
+	*a = NULL;
+}
+
 /* }}} */
 
 /* callbacks for toggle options {{{ */
+
+static void get_auto_hide_playlists_panel(void *data, char *buf, size_t size)
+{
+	strscpy(buf, bool_names[auto_hide_playlists_panel], size);
+}
+
+static void set_auto_hide_playlists_panel(void *data, const char *buf)
+{
+	parse_bool(buf, &auto_hide_playlists_panel);
+}
+
+static void toggle_auto_hide_playlists_panel(void *data)
+{
+	auto_hide_playlists_panel ^= 1;
+}
+
+static void get_auto_mark_selected_playlist(void *data, char *buf, size_t size)
+{
+	strscpy(buf, bool_names[auto_mark_selected_playlist], size);
+}
+
+static void set_auto_mark_selected_playlist(void *data, const char *buf)
+{
+	parse_bool(buf, &auto_mark_selected_playlist);
+	pl_sync_marked_pl();
+}
+
+static void toggle_auto_mark_selected_playlist(void *data)
+{
+	auto_mark_selected_playlist ^= 1;
+	pl_sync_marked_pl();
+}
 
 static void get_auto_reshuffle(void *data, char *buf, size_t size)
 {
@@ -680,6 +795,23 @@ static void set_smart_artist_sort(void *data, const char *buf)
 static void toggle_smart_artist_sort(void *data)
 {
 	smart_artist_sort ^= 1;
+	lib_sort_artists();
+}
+
+static void get_sort_albums_by_name(void *data, char *buf, size_t size)
+{
+	strscpy(buf, bool_names[sort_albums_by_name], size);
+}
+
+static void set_sort_albums_by_name(void *data, const char *buf)
+{
+	parse_bool(buf, &sort_albums_by_name);
+	lib_sort_artists();
+}
+
+static void toggle_sort_albums_by_name(void *data)
+{
+	sort_albums_by_name ^= 1;
 	lib_sort_artists();
 }
 
@@ -1054,10 +1186,10 @@ static void get_softvol(void *data, char *buf, size_t size)
 
 static void do_set_softvol(int soft)
 {
-	if (!soft_vol)
+	if (!soft_vol || pause_on_output_change)
 		mixer_close();
 	player_set_soft_vol(soft);
-	if (!soft_vol)
+	if (!soft_vol || pause_on_output_change)
 		mixer_open();
 	update_statusline();
 }
@@ -1104,6 +1236,21 @@ static void set_skip_track_info(void *data, const char *buf)
 static void toggle_skip_track_info(void *data)
 {
 	skip_track_info ^= 1;
+}
+
+static void get_ignore_duplicates(void *data, char *buf, size_t size)
+{
+	strscpy(buf, bool_names[ignore_duplicates], size);
+}
+
+static void set_ignore_duplicates(void *data, const char *buf)
+{
+	parse_bool(buf, &ignore_duplicates);
+}
+
+static void toggle_ignore_duplicates(void *data)
+{
+	ignore_duplicates ^= 1;
 }
 
 void update_mouse(void)
@@ -1231,6 +1378,57 @@ static void toggle_pause_on_output_change(void *data)
 	pause_on_output_change ^= 1;
 }
 
+static void get_block_key_paste(void *data, char *buf, size_t size)
+{
+	strscpy(buf, bool_names[block_key_paste], size);
+}
+
+static void set_block_key_paste(void *data, const char *buf)
+{
+	parse_bool(buf, &block_key_paste);
+}
+
+static void toggle_block_key_paste(void *data)
+{
+	block_key_paste ^= 1;
+}
+
+const char * const progress_bar_names[] = {
+	"disabled", "line", "shuttle", "color", "color_shuttle", NULL
+};
+
+static void get_progress_bar(void *data, char *buf, size_t size)
+{
+	strscpy(buf, progress_bar_names[progress_bar], size);
+}
+
+static void set_progress_bar(void *data, const char *buf)
+{
+	parse_enum(buf, 0, 4, progress_bar_names, &progress_bar);
+}
+
+static void toggle_progress_bar(void *data)
+{
+	progress_bar++;
+	progress_bar %= NR_PROGRESS_BAR_MODES;
+	update_statusline();
+}
+
+static void get_search_resets_position(void *data, char *buf, size_t size)
+{
+	strscpy(buf, bool_names[search_resets_position], size);
+}
+
+static void set_search_resets_position(void *data, const char *buf)
+{
+	parse_bool(buf, &search_resets_position);
+}
+
+static void toggle_search_resets_position(void *data)
+{
+	search_resets_position ^= 1;
+}
+
 /* }}} */
 
 /* special callbacks (id set) {{{ */
@@ -1292,6 +1490,7 @@ static void get_attr(void *data, char *buf, size_t size)
 	const char *reverse = "";
 	const char *blink = "";
 	const char *bold = "";
+	const char *italic = "";
 
 	if (attr & A_STANDOUT)
 		standout = "standout|";
@@ -1303,9 +1502,13 @@ static void get_attr(void *data, char *buf, size_t size)
 		blink = "blink|";
 	if (attr & A_BOLD)
 		bold = "bold|";
+	#if HAVE_ITALIC
+	if (attr & A_ITALIC)
+		italic = "italic|";
+	#endif
 
-	size_t len = snprintf(buf, size, "%s%s%s%s%s", standout, underline, reverse,
-			blink, bold);
+	size_t len = snprintf(buf, size, "%s%s%s%s%s%s",
+			standout, underline, reverse, blink, bold, italic);
 
 	if (0 < len && len < size)
 		buf[len - 1] = 0;
@@ -1335,6 +1538,10 @@ static void set_attr(void *data, const char *buf)
 				attr |= A_BLINK;
 			else if (strcmp(current, "bold") == 0)
 				attr |= A_BOLD;
+			#if HAVE_ITALIC
+			else if (strcmp(current, "italic") == 0)
+				attr |= A_ITALIC;
+			#endif
 
 			free(current);
 
@@ -1366,6 +1573,12 @@ static char **id_to_fmt(enum format_id id)
 		return &track_win_alt_format;
 	case FMT_CURRENT:
 		return &current_format;
+	case FMT_HEADING_ALBUM:
+		return &heading_album_format;
+	case FMT_HEADING_ARTIST:
+		return &heading_artist_format;
+	case FMT_HEADING_PLAYLIST:
+		return &heading_playlist_format;
 	case FMT_PLAYLIST:
 		return &list_win_format;
 	case FMT_PLAYLIST_VA:
@@ -1400,6 +1613,9 @@ static void get_format(void *data, char *buf, size_t size)
 static void set_format(void *data, const char *buf)
 {
 	char **fmtp = data;
+
+	if (fmtp == id_to_fmt(FMT_HEADING_ALBUM) || fmtp == id_to_fmt(FMT_HEADING_ARTIST) || fmtp == id_to_fmt(FMT_HEADING_PLAYLIST))
+		seen_pr1317_fmts = 1;
 
 	if (!track_format_valid(buf)) {
 		error_msg("invalid format string");
@@ -1442,6 +1658,7 @@ static const struct {
 	DT(continue)
 	DT(continue_album)
 	DT(smart_artist_sort)
+	DT(sort_albums_by_name)
 	DN(id3_default_charset)
 	DN(icecast_default_charset)
 	DN(lib_sort)
@@ -1461,6 +1678,8 @@ static const struct {
 	DT(auto_expand_albums_follow)
 	DT(auto_expand_albums_search)
 	DT(auto_expand_albums_selcur)
+	DT(auto_hide_playlists_panel)
+	DT(auto_mark_selected_playlist)
 	DT(show_all_tracks)
 	DT(show_current_bitrate)
 	DT(show_playback_position)
@@ -1473,6 +1692,7 @@ static const struct {
 	DN_FLAGS(status_display_program, OPT_PROGRAM_PATH)
 	DT(wrap_search)
 	DT(skip_track_info)
+	DT(ignore_duplicates)
 	DT(mouse)
 	DT(mpris)
 	DT(time_show_leading_zero)
@@ -1482,6 +1702,10 @@ static const struct {
 	DN(tree_width_percent)
 	DN(tree_width_max)
 	DT(pause_on_output_change)
+	DN(pl_env_vars)
+	DT(block_key_paste)
+	DT(progress_bar)
+	DT(search_resets_position)
 	{ NULL, NULL, NULL, NULL, 0 }
 };
 
@@ -1493,6 +1717,8 @@ static const char * const color_names[NR_COLORS] = {
 	"color_separator",
 	"color_statusline_bg",
 	"color_statusline_fg",
+	"color_statusline_progress_bg",
+	"color_statusline_progress_fg",
 	"color_titleline_bg",
 	"color_titleline_fg",
 	"color_win_bg",
@@ -1516,6 +1742,7 @@ static const char * const color_names[NR_COLORS] = {
 static const char * const attr_names[NR_ATTRS] = {
 	"color_cmdline_attr",
 	"color_statusline_attr",
+	"color_statusline_progress_attr",
 	"color_titleline_attr",
 	"color_win_attr",
 	"color_win_cur_sel_attr",
@@ -1584,9 +1811,23 @@ void option_set(const char *name, const char *value)
 		opt->set(opt->data, value);
 }
 
+static int default_colors[NR_COLORS];
+static int default_attrs[NR_ATTRS];
+
+void colors_reset(void)
+{
+	memcpy(colors, default_colors, sizeof(colors));
+	memcpy(attrs, default_attrs, sizeof(attrs));
+	update_colors();
+	update_full();
+}
+
 void options_add(void)
 {
 	int i;
+
+	memcpy(default_colors, colors, sizeof(colors));
+	memcpy(default_attrs, attrs, sizeof(attrs));
 
 	for (i = 0; simple_options[i].name; i++)
 		option_add(simple_options[i].name, NULL, simple_options[i].get,
@@ -1632,6 +1873,9 @@ void options_load(void)
 	for (i = 0; str_defaults[i].name; i++)
 		option_set(str_defaults[i].name, str_defaults[i].value);
 
+	/* reset the flag before loading the autosave */
+	seen_pr1317_fmts = 0;
+
 	/* load autosave config */
 	snprintf(filename, sizeof(filename), "%s/autosave", cmus_config_dir);
 	if (source_file(filename) == -1) {
@@ -1645,6 +1889,15 @@ void options_load(void)
 			die_errno("loading %s", def);
 
 		free(def);
+	}
+
+	/* replace old format with new one if upgrading past PR #1317 */
+	if (!seen_pr1317_fmts) {
+		option_set(str_defaults[FMT_STATUSLINE].name, str_defaults[FMT_STATUSLINE].value);
+		option_set(str_defaults[FMT_PLAYLIST_ALT].name, str_defaults[FMT_PLAYLIST_ALT].value);
+		option_set(str_defaults[FMT_TRACKWIN_ALBUM].name, str_defaults[FMT_TRACKWIN_ALBUM].value);
+		option_set(str_defaults[FMT_TRACKWIN].name, str_defaults[FMT_TRACKWIN].value);
+		option_set(str_defaults[FMT_TRACKWIN_VA].name, str_defaults[FMT_TRACKWIN_VA].value);
 	}
 
 	/* load optional static config */
@@ -1758,6 +2011,11 @@ static int handle_resume_line(void *data, const char *line)
 	} else if (strcmp(cmd, "browser-dir") == 0) {
 		free(resume->browser_dir);
 		resume->browser_dir = xstrdup(unescape(arg));
+	} else if (strcmp(cmd, "active-pl") == 0) {
+		free(pl_resume_name);
+		pl_resume_name = xstrdup(unescape(arg));
+	} else if (strcmp(cmd, "active-pl-row") == 0) {
+		str_to_int(arg, &pl_resume_row);
 	} else if (strcmp(cmd, "marked-pl") == 0) {
 		free(resume->marked_pl);
 		resume->marked_pl = xstrdup(unescape(arg));
@@ -1831,6 +2089,7 @@ void resume_exit(void)
 {
 	char filename_tmp[512];
 	char filename[512];
+	const char *pl_name;
 	struct track_info *ti;
 	FILE *f;
 	int rc;
@@ -1858,6 +2117,11 @@ void resume_exit(void)
 	if (lib_live_filter)
 		fprintf(f, "live-filter %s\n", escape(lib_live_filter));
 	fprintf(f, "browser-dir %s\n", escape(browser_dir));
+
+	if ((pl_name = pl_playing_pl_name())) {
+		fprintf(f, "active-pl %s\n", escape(pl_name));
+		fprintf(f, "active-pl-row %d\n", pl_playing_pl_row());
+	}
 
 	fprintf(f, "marked-pl %s\n", escape(pl_marked_pl_name()));
 

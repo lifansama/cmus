@@ -28,7 +28,7 @@
 #include <unistd.h>
 #endif
 
-#define IP_ABI_VERSION 1
+#define IP_ABI_VERSION 2
 
 enum {
 	/* no error */
@@ -78,6 +78,7 @@ struct input_plugin_data {
 	char *icy_name;
 	char *icy_genre;
 	char *icy_url;
+	char *icy_br;
 
 	/* filled by plugin */
 	sample_format_t sf;

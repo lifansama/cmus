@@ -67,6 +67,17 @@
 
 #endif
 
+/* Silences the unterminated-string-initialization warnings */
+#ifdef __has_attribute
+#if __has_attribute(nonstring)
+#define CMUS_NONSTRING __attribute__((nonstring))
+#endif
+#endif
+
+#ifndef CMUS_NONSTRING
+#define CMUS_NONSTRING
+#endif
+
 
 /**
  * container_of - cast a member of a structure out to the containing structure

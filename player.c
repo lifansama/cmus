@@ -30,6 +30,8 @@
 #include "mpris.h"
 #include "cmus.h"
 #include "lib.h"
+#include "pl_env.h"
+#include "ui_curses.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,6 +67,7 @@ static struct player_info player_info_priv = {
 	.ti = NULL,
 	.status = PLAYER_STATUS_STOPPED,
 	.pos = 0,
+	.seek_pos = 0.0,
 	.current_bitrate = -1,
 	.buffer_fill = 0,
 	.buffer_size = 0,
@@ -73,6 +76,7 @@ static struct player_info player_info_priv = {
 	.metadata_changed = 0,
 	.status_changed = 0,
 	.position_changed = 0,
+	.position_seeked = 0,
 	.buffer_fill_changed = 0,
 };
 
@@ -409,7 +413,7 @@ static inline unsigned int buffer_second_size(void)
 
 /* updating player status {{{ */
 
-static inline void _file_changed(struct track_info *ti)
+static inline void _file_changed(struct track_info *ti, int reset_seek)
 {
 	player_info_priv_lock();
 	if (player_info_priv.ti)
@@ -419,6 +423,8 @@ static inline void _file_changed(struct track_info *ti)
 	update_rg_scale();
 	player_metadata[0] = 0;
 	player_info_priv.file_changed = 1;
+	if (reset_seek)
+		player_info_priv.position_seeked = 0;
 	player_info_priv_unlock();
 }
 
@@ -429,7 +435,7 @@ static inline void file_changed(struct track_info *ti)
 	} else {
 		d_print("unloaded\n");
 	}
-	_file_changed(ti);
+	_file_changed(ti, 1);
 }
 
 static inline void metadata_changed(void)
@@ -523,9 +529,10 @@ static void _producer_buffer_fill_update(void)
 }
 
 /*
- * playing position changed
+ * playing position changed (seeked is nonzero if it was an explicit seek to
+ * seek_pos)
  */
-static void _consumer_position_update(void)
+static void _consumer_position_update(int seeked, double seek_pos)
 {
 	static unsigned int old_pos = -1;
 	unsigned int pos = 0;
@@ -533,11 +540,15 @@ static void _consumer_position_update(void)
 
 	if (consumer_status == CS_PLAYING || consumer_status == CS_PAUSED)
 		pos = consumer_pos / buffer_second_size();
-	if (pos != old_pos) {
+	if (pos != old_pos || seeked) {
 		old_pos = pos;
 
 		player_info_priv_lock();
 		player_info_priv.pos = pos;
+		if (seeked) {
+			player_info_priv.seek_pos = seek_pos;
+			player_info_priv.position_seeked = 1;
+		}
 
 		if (show_current_bitrate) {
 			bitrate = ip_current_bitrate(ip);
@@ -662,7 +673,12 @@ static void _producer_play(void)
 
 		rc = ip_open(ip);
 		if (rc) {
-			player_ip_error(rc, "opening file `%s'", ip_get_filename(ip));
+			int var_len;
+			const char *fn = ip_get_filename(ip), *var;
+			if ((var = pl_env_var(fn, &var_len)))
+				player_ip_error(rc, "opening file `%s': missing env var `%.*s`", pl_env_var_remainder(fn, var_len), var_len, var);
+			else
+				player_ip_error(rc, "opening file `%s'", fn);
 			ip_delete(ip);
 			_producer_status_update(PS_UNLOADED);
 		} else {
@@ -829,7 +845,7 @@ static void _consumer_handle_eof(void)
 		ip = ip_new(ti->filename);
 		_producer_status_update(PS_STOPPED);
 		/* PS_STOPPED, CS_PLAYING */
-		if (player_cont && (player_cont_album == 1 || strcmp(player_info_priv.ti->album,ti->album) == 0)) {
+		if (player_cont && (player_cont_album == 1 || (player_info_priv.ti->album && ti->album && strcmp(player_info_priv.ti->album,ti->album) == 0))) {
 			_producer_play();
 			if (producer_status == PS_UNLOADED) {
 				_consumer_stop();
@@ -886,7 +902,7 @@ static void *consumer_loop(void *arg)
 
 		while (1) {
 			if (space == 0) {
-				_consumer_position_update();
+				_consumer_position_update(0, 0.0);
 				consumer_unlock();
 				ms_sleep(25);
 				break;
@@ -912,7 +928,7 @@ static void *consumer_loop(void *arg)
 					} else {
 						/* possible underrun */
 						producer_unlock();
-						_consumer_position_update();
+						_consumer_position_update(0, 0.0);
 						consumer_unlock();
 /* 						d_print("possible underrun\n"); */
 						ms_sleep(10);
@@ -1214,7 +1230,7 @@ out:
 
 void player_file_changed(struct track_info *ti)
 {
-	_file_changed(ti);
+	_file_changed(ti, 0);
 }
 
 void player_seek(double offset, int relative, int start_playing)
@@ -1287,7 +1303,7 @@ void player_seek(double offset, int relative, int start_playing)
 			reset_buffer();
 			consumer_pos = new_pos * buffer_second_size();
 			scale_pos = consumer_pos;
-			_consumer_position_update();
+			_consumer_position_update(1, new_pos);
 			if (stopped && !start_playing) {
 				_producer_pause();
 				_consumer_pause();
@@ -1298,7 +1314,6 @@ void player_seek(double offset, int relative, int start_playing)
 			d_print("error: ip_seek returned %d\n", rc);
 		}
 	}
-	mpris_seeked();
 	player_unlock();
 }
 
@@ -1307,7 +1322,7 @@ void player_seek(double offset, int relative, int start_playing)
  */
 void player_set_op(const char *name)
 {
-	int rc;
+	int rc = 0;
 
 	player_lock();
 
@@ -1321,11 +1336,21 @@ void player_set_op(const char *name)
 	if (name) {
 		d_print("setting op to '%s'\n", name);
 		rc = op_select(name);
-	} else {
-		/* first initialized plugin */
+	}
+
+	/* when at startup and plugin is null, op_select_any() */
+	if (!ui_initialized && op_get_current() == NULL) {
+		if (rc)
+			/*
+			 * error if we are falling back because
+			 * the specified init plugin failed
+			 */
+			player_op_error(rc, "selecting output plugin '%s'", name);
+
 		d_print("selecting first initialized op\n");
 		rc = op_select_any();
 	}
+
 	if (rc) {
 		_consumer_status_update(CS_STOPPED);
 
@@ -1474,6 +1499,7 @@ void player_info_snapshot(void)
 	player_info_priv.metadata_changed = 0;
 	player_info_priv.status_changed = 0;
 	player_info_priv.position_changed = 0;
+	player_info_priv.position_seeked = 0;
 	player_info_priv.buffer_fill_changed = 0;
 	player_info_priv.error_msg = NULL;
 

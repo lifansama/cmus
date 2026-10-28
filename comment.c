@@ -195,7 +195,7 @@ int comments_get_date(const struct keyval *comments, const char *key)
 }
 
 static const char *interesting[] = {
-	"artist", "album", "title", "tracknumber", "discnumber", "genre",
+	"artist", "album", "title", "tracknumber", "discnumber", "totaldiscs", "genre",
 	"date", "compilation", "partofacompilation", "albumartist", "artistsort", "albumartistsort",
 	"albumsort",
 	"originaldate",
@@ -209,7 +209,7 @@ static const char *interesting[] = {
 	"comment",
 	"bpm",
 	"arranger", "composer", "conductor", "lyricist", "performer",
-	"remixer", "label", "publisher", "work", "opus", "partnumber", "part",
+	"remixer", "label", "publisher", "work", "opus",
 	"subtitle", "media",
 	NULL
 };
@@ -221,6 +221,9 @@ static struct {
 	{ "album_artist", "albumartist" },
 	{ "album artist", "albumartist" },
 	{ "disc", "discnumber" },
+	{ "part", "discnumber" },
+	{ "partnumber", "discnumber" },
+	{ "disctotal", "totaldiscs" },
 	{ "tempo", "bpm" },
 	{ "track", "tracknumber" },
 	{ "WM/Year", "date" },

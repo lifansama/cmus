@@ -51,6 +51,7 @@
 #include "mixer.h"
 #include "mpris.h"
 #include "locking.h"
+#include "pl_env.h"
 #ifdef HAVE_CONFIG
 #include "config/curses.h"
 #include "config/iconv.h"
@@ -143,10 +144,13 @@ static int win_active = 1;
 static int show_cursor;
 static int cursor_x;
 static int cursor_y;
+static int cmdline_cursor_x;
 
 static const int default_esc_delay = 25;
 
 static char *title_buf = NULL;
+
+static int in_bracketed_paste = 0;
 
 enum {
 	CURSED_WIN,
@@ -164,11 +168,12 @@ enum {
 	CURSED_COMMANDLINE,
 	CURSED_STATUSLINE,
 
+	CURSED_STATUSLINE_PROGRESS,
 	CURSED_TITLELINE,
 	CURSED_DIR,
 	CURSED_ERROR,
-	CURSED_INFO,
 
+	CURSED_INFO,
 	CURSED_TRACKWIN_ALBUM,
 
 	NR_CURSED
@@ -190,11 +195,12 @@ static unsigned char cursed_to_bg_idx[NR_CURSED] = {
 	COLOR_CMDLINE_BG,
 	COLOR_STATUSLINE_BG,
 
+	COLOR_STATUSLINE_PROGRESS_BG,
 	COLOR_TITLELINE_BG,
 	COLOR_WIN_BG,
 	COLOR_CMDLINE_BG,
-	COLOR_CMDLINE_BG,
 
+	COLOR_CMDLINE_BG,
 	COLOR_TRACKWIN_ALBUM_BG,
 };
 
@@ -214,11 +220,12 @@ static unsigned char cursed_to_fg_idx[NR_CURSED] = {
 	COLOR_CMDLINE_FG,
 	COLOR_STATUSLINE_FG,
 
+	COLOR_STATUSLINE_PROGRESS_FG,
 	COLOR_TITLELINE_FG,
 	COLOR_WIN_DIR,
 	COLOR_ERROR,
-	COLOR_INFO,
 
+	COLOR_INFO,
 	COLOR_TRACKWIN_ALBUM_FG,
 };
 
@@ -238,11 +245,12 @@ static unsigned char cursed_to_attr_idx[NR_CURSED] = {
 	COLOR_CMDLINE_ATTR,
 	COLOR_STATUSLINE_ATTR,
 
+	COLOR_STATUSLINE_PROGRESS_ATTR,
 	COLOR_TITLELINE_ATTR,
 	COLOR_WIN_ATTR,
 	COLOR_CMDLINE_ATTR,
-	COLOR_CMDLINE_ATTR,
 
+	COLOR_CMDLINE_ATTR,
 	COLOR_TRACKWIN_ALBUM_ATTR,
 };
 
@@ -254,6 +262,7 @@ enum {
 	TF_ARTIST,
 	TF_ALBUM,
 	TF_DISC,
+	TF_TOTAL_DISCS,
 	TF_TRACK,
 	TF_TITLE,
 	TF_PLAY_COUNT,
@@ -303,6 +312,7 @@ enum {
 	TF_SHUFFLE,
 	TF_PLAYLISTMODE,
 	TF_BPM,
+	TF_PANEL,
 
 	NR_TFS
 };
@@ -312,6 +322,7 @@ static struct format_option track_fopts[NR_TFS + 1] = {
 	DEF_FO_STR('a', "artist", 0),
 	DEF_FO_STR('l', "album", 0),
 	DEF_FO_INT('D', "discnumber", 1),
+	DEF_FO_INT('T', "totaldiscs", 1),
 	DEF_FO_INT('n', "tracknumber", 1),
 	DEF_FO_STR('t', "title", 0),
 	DEF_FO_INT('X', "play_count", 0),
@@ -361,6 +372,7 @@ static struct format_option track_fopts[NR_TFS + 1] = {
 	DEF_FO_STR('\0', "shuffle", 0),
 	DEF_FO_STR('\0', "playlist_mode", 0),
 	DEF_FO_INT('\0', "bpm", 0),
+	DEF_FO_INT('\0', "panel", 0),
 	DEF_FO_END
 };
 
@@ -447,19 +459,19 @@ fallback:
 
 /* screen updates {{{ */
 
-static void dump_print_buffer_no_clear(int row, int col)
+static void dump_print_buffer_no_clear(int row, int col, size_t offset)
 {
 	if (using_utf8) {
-		(void) mvaddstr(row, col, print_buffer.buffer);
+		(void) mvaddstr(row, col, print_buffer.buffer + offset);
 	} else {
-		utf8_decode(print_buffer.buffer);
+		utf8_decode(print_buffer.buffer + offset);
 		(void) mvaddstr(row, col, conv_buffer);
 	}
 }
 
 static void dump_print_buffer(int row, int col)
 {
-	dump_print_buffer_no_clear(row, col);
+	dump_print_buffer_no_clear(row, col, 0);
 	gbuf_clear(&print_buffer);
 }
 
@@ -530,6 +542,7 @@ static void fill_track_fopts_track_info(struct track_info *info)
 	fopt_set_str(&track_fopts[TF_ALBUM], info->album);
 	fopt_set_int(&track_fopts[TF_PLAY_COUNT], info->play_count, 0);
 	fopt_set_int(&track_fopts[TF_DISC], info->discnumber, info->discnumber == -1);
+	fopt_set_int(&track_fopts[TF_TOTAL_DISCS], info->totaldiscs, info->totaldiscs == -1);
 	fopt_set_int(&track_fopts[TF_TRACK], info->tracknumber, info->tracknumber == -1);
 	fopt_set_str(&track_fopts[TF_TITLE], info->title);
 	fopt_set_int(&track_fopts[TF_YEAR], info->date / 10000, info->date <= 0);
@@ -556,8 +569,8 @@ static void fill_track_fopts_track_info(struct track_info *info)
 	fopt_set_str(&track_fopts[TF_PUBLISHER], keyvals_get_val(info->comments, "publisher"));
 	fopt_set_str(&track_fopts[TF_WORK], keyvals_get_val(info->comments, "work"));
 	fopt_set_str(&track_fopts[TF_OPUS], keyvals_get_val(info->comments, "opus"));
-	fopt_set_str(&track_fopts[TF_PARTNUMBER], keyvals_get_val(info->comments, "partnumber"));
-	fopt_set_str(&track_fopts[TF_PART], keyvals_get_val(info->comments, "part"));
+	fopt_set_str(&track_fopts[TF_PARTNUMBER], keyvals_get_val(info->comments, "discnumber"));
+	fopt_set_str(&track_fopts[TF_PART], keyvals_get_val(info->comments, "discnumber"));
 	fopt_set_str(&track_fopts[TF_SUBTITLE], keyvals_get_val(info->comments, "subtitle"));
 	fopt_set_str(&track_fopts[TF_MEDIA], info->media);
 	fopt_set_int(&track_fopts[TF_VA], 0, !track_is_compilation(info->comments));
@@ -576,7 +589,20 @@ static int get_album_length(struct album *album)
 	int duration = 0;
 
 	rb_for_each_entry(track, tmp, &album->track_root, tree_node) {
-		duration += tree_track_info(track)->duration;
+		duration += max_i(0, tree_track_info(track)->duration);
+	}
+
+	return duration;
+}
+
+static int get_artist_length(struct artist *artist)
+{
+	struct album *album;
+	struct rb_node *tmp;
+	int duration = 0;
+
+	rb_for_each_entry(album, tmp, &artist->album_root, tree_node) {
+		duration += get_album_length(album);
 	}
 
 	return duration;
@@ -589,7 +615,9 @@ static void fill_track_fopts_album(struct album *album)
 	fopt_set_str(&track_fopts[TF_ALBUMARTIST], album->artist->name);
 	fopt_set_str(&track_fopts[TF_ARTIST], album->artist->name);
 	fopt_set_str(&track_fopts[TF_ALBUM], album->name);
-	fopt_set_time(&track_fopts[TF_ALBUMDURATION], get_album_length(album), 0);
+	int duration = get_album_length(album);
+	fopt_set_time(&track_fopts[TF_DURATION], duration, 0);
+	fopt_set_time(&track_fopts[TF_ALBUMDURATION], duration, 0);
 }
 
 static void fill_track_fopts_artist(struct artist *artist)
@@ -597,6 +625,7 @@ static void fill_track_fopts_artist(struct artist *artist)
 	const char *name = display_artist_sort_name ? artist_sort_name(artist) : artist->name;
 	fopt_set_str(&track_fopts[TF_ARTIST], name);
 	fopt_set_str(&track_fopts[TF_ALBUMARTIST], name);
+	fopt_set_time(&track_fopts[TF_DURATION], get_artist_length(artist), 0);
 }
 
 const struct format_option *get_global_fopts(void)
@@ -612,8 +641,12 @@ const struct format_option *get_global_fopts(void)
 	int buffer_fill, vol, vol_left, vol_right;
 	int duration = -1;
 
-	fopt_set_time(&track_fopts[TF_TOTAL], play_library ? lib_editable.total_time :
-			pl_playing_total_time(), 0);
+	unsigned int total_time = pl_playing_total_time();
+	if (cmus_queue_active())
+		total_time = play_queue_total_time();
+	else if (play_library)
+		total_time = lib_editable.total_time;
+	fopt_set_time(&track_fopts[TF_TOTAL], total_time, 0);
 
 	fopt_set_str(&track_fopts[TF_FOLLOW], follow_strs[follow]);
 	fopt_set_str(&track_fopts[TF_REPEAT], repeat_strs[repeat]);
@@ -830,7 +863,7 @@ static void print_filter(struct window *win, int row, struct iter *iter)
 	int selected;
 	/* is the filter currently active? */
 	int current = !!e->act_stat;
-	const char stat_chars[3] = " *!";
+	const char stat_chars[3] CMUS_NONSTRING = " *!";
 	int ch1, ch2, ch3;
 	const char *e_filter;
 
@@ -932,7 +965,7 @@ static void update_window(struct window *win, int x, int y, int w, const char *t
 	bkgdset(pairs[0]);
 	gbuf_set(&print_buffer, ' ', w);
 	while (i < nr_rows) {
-		dump_print_buffer_no_clear(y + i + 1, x);
+		dump_print_buffer_no_clear(y + i + 1, x, 0);
 		i++;
 	}
 	gbuf_clear(&print_buffer);
@@ -940,7 +973,13 @@ static void update_window(struct window *win, int x, int y, int w, const char *t
 
 static void update_tree_window(void)
 {
-	update_window(lib_tree_win, tree_win_x, 0, tree_win_w + 1, "Artist / Album", print_tree);
+	static GBUF(buf);
+	gbuf_clear(&buf);
+
+	gbuf_add_str(&buf, "Library");
+	if (worker_has_job())
+		gbuf_addf(&buf, " - %d tracks", lib_editable.nr_tracks);
+	update_window(lib_tree_win, tree_win_x, 0, tree_win_w + 1, buf.buffer, print_tree);
 }
 
 static void update_track_window(void)
@@ -948,9 +987,22 @@ static void update_track_window(void)
 	static GBUF(title);
 	gbuf_clear(&title);
 
-	/* it doesn't matter what format options we use because the format
-	 * string does not contain any format charaters */
-	format_print(&title, track_win_w - 2, "Track%= Library", track_fopts);
+	struct iter iter;
+	struct album *album;
+	struct artist *artist;
+
+	const char *format_str = "Empty (use :add)";
+
+	if (window_get_sel(lib_tree_win, &iter)) {
+		if ((album = iter_to_album(&iter))) {
+			fill_track_fopts_album(album);
+			format_str = heading_album_format;
+		} else if ((artist = iter_to_artist(&iter))) {
+			fill_track_fopts_artist(artist);
+			format_str = heading_artist_format;
+		}
+	}
+	format_print(&title, track_win_w - 2, format_str, track_fopts);
 	update_window(lib_track_win, track_win_x, 0, track_win_w, title.buffer,
 			print_track);
 }
@@ -976,9 +1028,23 @@ static void print_pl_list(struct window *win, int row, struct iter *iter)
 	dump_print_buffer(row + 1, 0);
 }
 
+static void draw_separator(void)
+{
+	int row;
+
+	bkgdset(pairs[CURSED_WIN_TITLE]);
+	(void) mvaddch(0, tree_win_w, ' ');
+	bkgdset(pairs[CURSED_SEPARATOR]);
+	for (row = 1; row < LINES - 3; row++)
+		(void) mvaddch(row, tree_win_w, ACS_VLINE);
+}
+
 static void update_pl_list(struct window *win)
 {
-	update_window(win, tree_win_x, 0, tree_win_w + 1, "Playlist", print_pl_list);
+	if (pl_show_panel()) {
+		update_window(win, tree_win_x, 0, tree_win_w + 1, "Playlist", print_pl_list);
+		draw_separator();
+	}
 }
 
 static void update_pl_tracks(struct window *win)
@@ -987,15 +1053,22 @@ static void update_pl_tracks(struct window *win)
 	gbuf_clear(&title);
 	int win_w_tmp = win_w;
 
-	win_x = track_win_x;
-	win_w = track_win_w;
+	if (pl_show_panel()) {
+		win_x = track_win_x;
+		win_w = track_win_w;
+	} else {
+		win_x = 0;
+		win_w = tree_win_w + 1 + track_win_w;
+	}
 	win_active = pl_get_cursor_in_track_window();
 
 	get_global_fopts();
-	fopt_set_time(&track_fopts[TF_TOTAL], pl_visible_total_time(), 0);
+	fopt_set_int(&track_fopts[TF_PANEL], 1, !pl_show_panel());
+	fopt_set_str(&track_fopts[TF_TITLE], pl_visible_get_name());
+	fopt_set_time(&track_fopts[TF_DURATION], pl_visible_total_time(), 0);
 
-	format_print(&title, track_win_w - 2, "Track%= %{total}", track_fopts);
-	update_window(win, track_win_x, 0, track_win_w, title.buffer, print_editable);
+	format_print(&title, win_w - 2, heading_playlist_format, track_fopts);
+	update_window(win, win_x, 0, win_w, title.buffer, print_editable);
 
 	win_active = 1;
 	win_x = 0;
@@ -1038,6 +1111,9 @@ static void update_editable_window(struct editable *e, const char *title, const 
 		gbuf_addf(&buf, "%s - %d tracks", title, e->nr_tracks);
 	}
 
+	fopt_set_time(&track_fopts[TF_TOTAL], e->total_time, 0);
+	format_print(&buf, 0, " (%{total})", track_fopts);
+
 	if (e->nr_marked) {
 		gbuf_addf(&buf, " (%d marked)", e->nr_marked);
 	}
@@ -1051,7 +1127,7 @@ static void update_editable_window(struct editable *e, const char *title, const 
 static void update_sorted_window(void)
 {
 	current_track = (struct simple_track *)lib_cur_track;
-	update_editable_window(&lib_editable, "Library", lib_filename);
+	update_editable_window(&lib_editable, "Library", NULL);
 }
 
 static void update_play_queue_window(void)
@@ -1088,26 +1164,17 @@ static void update_help_window(void)
 	update_window(help_win, 0, 0, win_w, "Settings", print_help);
 }
 
-static void draw_separator(void)
-{
-	int row;
-
-	bkgdset(pairs[CURSED_WIN_TITLE]);
-	(void) mvaddch(0, tree_win_w, ' ');
-	bkgdset(pairs[CURSED_SEPARATOR]);
-	for (row = 1; row < LINES - 3; row++)
-		(void) mvaddch(row, tree_win_w, ACS_VLINE);
-}
-
 static void update_pl_view(int full)
 {
 	current_track = pl_get_playing_track();
 	pl_draw(update_pl_list, update_pl_tracks, full);
-	draw_separator();
 }
 
 static void do_update_view(int full)
 {
+	if (!ui_initialized)
+		return;
+
 	cursor_x = -1;
 	cursor_y = -1;
 
@@ -1144,9 +1211,57 @@ static void do_update_view(int full)
 
 static void do_update_statusline(void)
 {
-	format_print(&print_buffer, win_w, statusline_format, get_global_fopts());
+	struct fp_len len;
+	len = format_print(&print_buffer, win_w, statusline_format, get_global_fopts());
 	bkgdset(pairs[CURSED_STATUSLINE]);
-	dump_print_buffer(LINES - 2, 0);
+	dump_print_buffer_no_clear(LINES - 2, 0, 0);
+
+	if (progress_bar && player_info.ti) {
+		int duration = player_info.ti->duration;
+		if (duration && duration >= player_info.pos) {
+			if (progress_bar == PROGRESS_BAR_LINE || progress_bar == PROGRESS_BAR_SHUTTLE) {
+				/* Draw a bar or short position marker within the blank space */
+				int shuttle_len = (progress_bar == PROGRESS_BAR_SHUTTLE) ? 2 : 0;
+				int bar_start = len.llen + len.mlen;
+				int bar_space = win_w - len.rlen - bar_start - shuttle_len;
+				if (bar_space >= 5) {
+					int bar_len = bar_space * player_info.pos / duration;
+				        if (progress_bar == PROGRESS_BAR_SHUTTLE) {
+						bar_start += bar_len;
+						bar_len = shuttle_len;
+					}
+					for (int x = bar_start; bar_len; --bar_len)
+						(void) mvaddstr(LINES - 2, x++, using_utf8 ? "━" : "-");
+				}
+			} else if (progress_bar == PROGRESS_BAR_COLOR) {
+				/* Draw over the played portion of bar in alt color */
+				int w = win_w * player_info.pos / duration;
+
+				int skip = w;
+				int buf_index = u_skip_chars(print_buffer.buffer, &skip, false);
+				print_buffer.buffer[buf_index] = '\0';
+
+				bkgdset(pairs[CURSED_STATUSLINE_PROGRESS]);
+				dump_print_buffer_no_clear(LINES - 2, 0, 0);
+
+			} else { // PROGRESS_BAR_COLOR_SHUTTLE
+				/* Redraw a few cols in alt color to mark the current position */
+				int shuttle_len = min_u(6, win_w);
+				int x = (win_w - shuttle_len) * player_info.pos / duration;
+
+				int skip = x;
+				int buf_index = u_skip_chars(print_buffer.buffer, &skip, false);
+
+				int end_offset = u_skip_chars(print_buffer.buffer + buf_index, &shuttle_len, true);
+				print_buffer.buffer[buf_index+end_offset] = '\0';
+
+				bkgdset(pairs[CURSED_STATUSLINE_PROGRESS]);
+				dump_print_buffer_no_clear(LINES - 2, x, buf_index);
+			}
+		}
+	}
+
+	gbuf_clear(&print_buffer);
 
 	if (player_info.error_msg)
 		error_msg("%s", player_info.error_msg);
@@ -1165,8 +1280,7 @@ static void dump_buffer(const char *buffer)
 static void do_update_commandline(void)
 {
 	char *str;
-	int w;
-	size_t idx;
+	size_t idx = 0;
 	char ch;
 
 	move(LINES - 1, 0);
@@ -1206,46 +1320,38 @@ static void do_update_commandline(void)
 	}
 
 	/* COMMAND_MODE or SEARCH_MODE */
-	w = u_str_width(str);
 	ch = ':';
 	if (input_mode == SEARCH_MODE)
 		ch = search_direction == SEARCH_FORWARD ? '/' : '?';
 
-	if (w <= win_w - 2) {
+	int width = win_w - 2; // ':' at start and ' ' at end
+
+	/* width of the text in the buffer before and after cursor */
+	int cw = u_str_nwidth(str, cmdline.cpos);
+	int extra_w = u_str_width(str + cmdline.bpos);
+
+	/* shift by third of bar width to provide visual context when editing */
+	int context_w = min_u(extra_w, win_w / 3);
+
+	int skip = cw + context_w - width;
+	if (skip <= 0) {
 		addch(ch);
-		gbuf_add_ustr(&print_buffer, str, &w);
-		dump_buffer(print_buffer.buffer);
-		gbuf_clear(&print_buffer);
-		clrtoeol();
+		cmdline_cursor_x = 1 + cw;
 	} else {
-		/* keep cursor as far right as possible */
-		int skip, width, cw;
-
-		/* cursor pos (width, not chars. doesn't count the ':') */
-		cw = u_str_nwidth(str, cmdline.cpos);
-
-		skip = cw + 2 - win_w;
-		if (skip > 0) {
-			/* skip the ':' */
-			skip--;
-
-			/* skip rest (if any) */
-			idx = u_skip_chars(str, &skip, true);
-
-			width = win_w;
-			gbuf_add_ustr(&print_buffer, str + idx, &width);
-			gbuf_set(&print_buffer, ' ', width);
-			dump_buffer(print_buffer.buffer);
-			gbuf_clear(&print_buffer);
-		} else {
-			/* print ':' + win_w - 1 chars */
-			addch(ch);
-			width = win_w - 1;
-			gbuf_add_ustr(&print_buffer, str, &width);
-			dump_buffer(print_buffer.buffer);
-			gbuf_clear(&print_buffer);
-		}
+		/* ':' will not be printed */
+		skip--;
+		width++;
+		idx = u_skip_chars(str, &skip, true);
+		gbuf_set(&print_buffer, ' ', -skip);
+		width += skip;
+		cmdline_cursor_x = win_w - 1 - context_w;
 	}
+	/* allow printing in ' ' space we kept at end, cursor isn't always there */
+	width++;
+	gbuf_add_ustr(&print_buffer, str + idx, &width);
+	dump_buffer(print_buffer.buffer);
+	gbuf_clear(&print_buffer);
+	clrtoeol();
 }
 
 static void set_title(const char *title)
@@ -1261,6 +1367,9 @@ static void set_title(const char *title)
 
 static void do_update_titleline(void)
 {
+	if (!ui_initialized)
+		return;
+
 	bkgdset(pairs[CURSED_TITLELINE]);
 	if (player_info.ti) {
 		int use_alt_format = 0;
@@ -1317,48 +1426,11 @@ static void do_update_titleline(void)
 	}
 }
 
-static int cmdline_cursor_column(void)
-{
-	char *str;
-	int cw, skip, s;
-
-	str = cmdline.line;
-	if (!using_utf8) {
-		/* see do_update_commandline */
-		utf8_encode_to_buf(cmdline.line);
-		str = conv_buffer;
-	}
-
-	/* width of the text in the buffer before cursor */
-	cw = u_str_nwidth(str, cmdline.cpos);
-
-	if (1 + cw < win_w) {
-		/* whole line is visible */
-		return 1 + cw;
-	}
-
-	/* beginning of cmdline is not visible */
-
-	/* check if the first visible char in cmdline would be halved
-	 * double-width character (or invalid byte <xx>) which is not possible.
-	 * we need to skip the whole character and move cursor to win_w - 2
-	 * column. */
-	skip = cw + 2 - win_w;
-
-	/* skip the ':' */
-	skip--;
-
-	/* skip rest */
-	s = skip;
-	u_skip_chars(str, &s, true);
-	return win_w - 1 + s;
-}
-
 static void post_update(void)
 {
 	/* refresh makes cursor visible at least for urxvt */
 	if (input_mode == COMMAND_MODE || input_mode == SEARCH_MODE) {
-		move(LINES - 1, cmdline_cursor_column());
+		move(LINES - 1, cmdline_cursor_x);
 		refresh();
 		curs_set(1);
 	} else {
@@ -1713,7 +1785,7 @@ static void clear_error(void)
 
 /* screen updates }}} */
 
-static int fill_status_program_track_info_args(char **argv, int i, struct track_info *ti)
+static int fill_status_program_track_info_args(char **argv, int i, struct player_info *pi, struct track_info *ti)
 {
 	/* returns first free argument index */
 
@@ -1763,10 +1835,17 @@ static int fill_status_program_track_info_args(char **argv, int i, struct track_
 		argv[i++] = xstrdup(stream_title);
 	}
 
+	if (pi) {
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%d", pi->pos);
+		argv[i++] = xstrdup("position");
+		argv[i++] = xstrdup(buf);
+	}
+
 	return i;
 }
 
-static void spawn_status_program_inner(const char *status_text, struct track_info *ti)
+static void spawn_status_program_inner(const char *status_text, struct player_info *pi, struct track_info *ti)
 {
 	if (status_display_program == NULL || status_display_program[0] == 0)
 		return;
@@ -1780,7 +1859,7 @@ static void spawn_status_program_inner(const char *status_text, struct track_inf
 	argv[i++] = xstrdup(status_text);
 
 	if (ti) {
-		i = fill_status_program_track_info_args(argv, i, ti);
+		i = fill_status_program_track_info_args(argv, i, pi, ti);
 	}
 	argv[i++] = NULL;
 
@@ -1792,7 +1871,7 @@ static void spawn_status_program_inner(const char *status_text, struct track_inf
 
 static void spawn_status_program(void)
 {
-	spawn_status_program_inner(player_status_names[player_info.status], player_info.ti);
+	spawn_status_program_inner(player_status_names[player_info.status], &player_info, player_info.ti);
 }
 
 static volatile sig_atomic_t ctrl_c_pressed = 0;
@@ -1862,8 +1941,8 @@ static void update_window_size(void)
 #endif
 		w = COLS;
 		h = LINES - 3;
-		if (w < 3)
-			w = 3;
+		if (w < 4)
+			w = 4;
 		if (h < 2)
 			h = 2;
 		win_w = w;
@@ -1881,11 +1960,18 @@ static void update_window_size(void)
 
 static void update(void)
 {
+	static bool first_update = true;
 	int needs_view_update = 0;
 	int needs_title_update = 0;
 	int needs_status_update = 0;
 	int needs_command_update = 0;
 	int needs_spawn = 0;
+
+	if (first_update) {
+		needs_title_update = 1;
+		needs_command_update = 1;
+		first_update = false;
+	}
 
 	if (needs_to_resize) {
 		update_window_size();
@@ -1899,6 +1985,11 @@ static void update(void)
 
 	if (player_info.file_changed || player_info.metadata_changed)
 		mpris_metadata_changed();
+
+	/* mpris_metadata_changed() also emits Seeked */
+	if (player_info.position_seeked && !player_info.file_changed &&
+			!player_info.metadata_changed)
+		mpris_seeked();
 
 	needs_spawn = player_info.status_changed || player_info.file_changed ||
 		player_info.metadata_changed;
@@ -1936,7 +2027,9 @@ static void update(void)
 	}
 
 	/* total time changed? */
-	if (play_library) {
+	if (cmus_queue_active()) {
+		needs_status_update += queue_needs_redraw();
+	} else if (play_library) {
 		needs_status_update += lib_editable.shared->win->changed;
 		lib_editable.shared->win->changed = 0;
 	} else {
@@ -1959,19 +2052,63 @@ static void update(void)
 			do_update_commandline();
 		post_update();
 	}
+
+	/* Reset changed flags */
+	queue_post_update();
 }
 
 static void handle_ch(uchar ch)
 {
 	clear_error();
 	if (input_mode == NORMAL_MODE) {
-		normal_mode_ch(ch);
+		if (!block_key_paste || !in_bracketed_paste) {
+			normal_mode_ch(ch);
+		}
 	} else if (input_mode == COMMAND_MODE) {
 		command_mode_ch(ch);
 		update_commandline();
 	} else if (input_mode == SEARCH_MODE) {
 		search_mode_ch(ch);
 		update_commandline();
+	}
+}
+
+static void handle_csi(void) {
+	// after ESC[ until 0x40-0x7E (@A–Z[\]^_`a–z{|}~)
+	// https://en.wikipedia.org/wiki/ANSI_escape_code#CSI_(Control_Sequence_Introducer)_sequences
+	// https://www.ecma-international.org/wp-content/uploads/ECMA-48_5th_edition_june_1991.pdf
+
+	int c;
+	int buf[16]; // buffer a reasonable length
+	size_t buf_n = 0;
+	int overflow = 0;
+
+	while (1) {
+		c = getch();
+		if (c == ERR || c == 0) {
+			return;
+		}
+		if (buf_n < sizeof(buf)/sizeof(*buf)) {
+			buf[buf_n++] = c;
+		} else {
+			overflow = 1;
+		}
+		if (c >= 0x40 && c <= 0x7E) {
+			break;
+		}
+	}
+
+	if (overflow) {
+		return;
+	}
+
+	if (buf_n == 4) {
+		// bracketed paste
+		// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Bracketed-Paste-Mode
+		if (buf[0] == '2' && buf[1] == '0' && (buf[2] == '0' || buf[2] == '1') && buf[3] == '~') {
+			in_bracketed_paste = buf[2] == '0';
+			return;
+		}
 	}
 }
 
@@ -1993,7 +2130,9 @@ static void handle_key(int key)
 {
 	clear_error();
 	if (input_mode == NORMAL_MODE) {
-		normal_mode_key(key);
+		if (!block_key_paste || !in_bracketed_paste) {
+			normal_mode_key(key);
+		}
 	} else if (input_mode == COMMAND_MODE) {
 		command_mode_key(key);
 		update_commandline();
@@ -2053,8 +2192,11 @@ static void u_getch(void)
 		cbreak();
 		int e_key = getch();
 		halfdelay(5);
-		if (e_key != ERR && e_key != 0) {
-			handle_escape(e_key);
+		if (e_key != ERR) {
+			if (e_key == '[')
+				handle_csi();
+			else if (e_key != 0)
+				handle_escape(e_key);
 			return;
 		}
 	}
@@ -2322,6 +2464,9 @@ static void init_all(void)
 	/* plugins have been loaded so we know what plugin options are available */
 	options_add();
 
+	/* cache the normalized env vars for pl_env */
+	pl_env_init();
+
 	lib_init();
 	searchable = tree_searchable;
 	cmus_init();
@@ -2335,12 +2480,13 @@ static void init_all(void)
 
 	/* almost everything must be initialized now */
 	options_load();
+	pl_init_options();
 	if (mpris)
 		mpris_init();
 
 	/* finally we can set the output plugin */
 	player_set_op(output_plugin);
-	if (!soft_vol)
+	if (!soft_vol || pause_on_output_change)
 		mixer_open();
 
 	lib_autosave_filename = xstrjoin(cmus_config_dir, "/lib.pl");
@@ -2360,6 +2506,10 @@ static void init_all(void)
 
 	init_curses();
 
+	// enable bracketed paste (will be ignored if not supported)
+	printf("\033[?2004h");
+	fflush(stdout);
+
 	if (resume_cmus) {
 		resume_load();
 		cmus_add(play_queue_append, play_queue_autosave_filename,
@@ -2377,6 +2527,10 @@ static void init_all(void)
 static void exit_all(void)
 {
 	endwin();
+
+	// disable bracketed paste
+	printf("\033[?2004l");
+	fflush(stdout);
 
 	if (resume_cmus)
 		resume_exit();
@@ -2497,6 +2651,6 @@ int main(int argc, char *argv[])
 	init_all();
 	main_loop();
 	exit_all();
-	spawn_status_program_inner("exiting", NULL);
+	spawn_status_program_inner("exiting", NULL, NULL);
 	return 0;
 }

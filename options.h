@@ -74,35 +74,39 @@ enum {
 	COLOR_SEPARATOR,
 	COLOR_STATUSLINE_BG,
 	COLOR_STATUSLINE_FG,
-	COLOR_TITLELINE_BG,
+	COLOR_STATUSLINE_PROGRESS_BG,
 
+	COLOR_STATUSLINE_PROGRESS_FG,
+	COLOR_TITLELINE_BG,
 	COLOR_TITLELINE_FG,
 	COLOR_WIN_BG,
+
 	COLOR_WIN_CUR,
 	COLOR_WIN_CUR_SEL_BG,
-
 	COLOR_WIN_CUR_SEL_FG,
 	COLOR_WIN_DIR,
+
 	COLOR_WIN_FG,
 	COLOR_WIN_INACTIVE_CUR_SEL_BG,
-
 	COLOR_WIN_INACTIVE_CUR_SEL_FG,
 	COLOR_WIN_INACTIVE_SEL_BG,
+
 	COLOR_WIN_INACTIVE_SEL_FG,
 	COLOR_WIN_SEL_BG,
-
 	COLOR_WIN_SEL_FG,
 	COLOR_WIN_TITLE_BG,
+
 	COLOR_WIN_TITLE_FG,
 	COLOR_TRACKWIN_ALBUM_BG,
-
 	COLOR_TRACKWIN_ALBUM_FG,
+
 	NR_COLORS
 };
 
 enum {
 	COLOR_CMDLINE_ATTR,
 	COLOR_STATUSLINE_ATTR,
+	COLOR_STATUSLINE_PROGRESS_ATTR,
 	COLOR_TITLELINE_ATTR,
 	COLOR_WIN_ATTR,
 	COLOR_WIN_CUR_SEL_ATTR,
@@ -125,6 +129,15 @@ enum shuffle_mode {
 	SHUFFLE_TRUE
 };
 
+enum progress_bar_mode {
+	PROGRESS_BAR_DISABLED,
+	PROGRESS_BAR_LINE,
+	PROGRESS_BAR_SHUTTLE,
+	PROGRESS_BAR_COLOR,
+	PROGRESS_BAR_COLOR_SHUTTLE,
+	NR_PROGRESS_BAR_MODES
+};
+
 #define BRIGHT (1 << 3)
 
 extern char *cdda_device;
@@ -134,6 +147,8 @@ extern char *server_password;
 extern int auto_expand_albums_follow;
 extern int auto_expand_albums_search;
 extern int auto_expand_albums_selcur;
+extern int auto_hide_playlists_panel;
+extern int auto_mark_selected_playlist;
 extern int show_all_tracks;
 extern int auto_reshuffle;
 extern int confirm_run;
@@ -150,9 +165,11 @@ extern int shuffle;
 extern int follow;
 extern int display_artist_sort_name;
 extern int smart_artist_sort;
+extern int sort_albums_by_name;
 extern int scroll_offset;
 extern int rewind_offset;
 extern int skip_track_info;
+extern int ignore_duplicates;
 extern int mouse;
 extern int mpris;
 extern int time_show_leading_zero;
@@ -161,6 +178,9 @@ extern int stop_after_queue;
 extern int tree_width_percent;
 extern int tree_width_max;
 extern int pause_on_output_change;
+extern int block_key_paste;
+extern int progress_bar;
+extern int search_resets_position;
 
 extern const char * const aaa_mode_names[];
 extern const char * const view_names[NR_VIEWS + 1];
@@ -187,6 +207,11 @@ extern char *list_win_alt_format;
 extern char *current_format;
 extern char *current_alt_format;
 
+/* format string for trackwin heading bar */
+extern char *heading_album_format;
+extern char *heading_artist_format;
+extern char *heading_playlist_format;
+
 /* format string for status line */
 extern char *statusline_format;
 
@@ -201,8 +226,14 @@ extern char *clipped_text_internal;
 extern char *id3_default_charset;
 extern char *icecast_default_charset;
 
+/* comma-separated list of env vars to substitute in saved library/cache paths */
+extern char **pl_env_vars;
+
 /* build option list */
 void options_add(void);
+
+/* restore colors[]/attrs[] to the initial state */
+void colors_reset(void);
 
 /* load options from the config file */
 void options_load(void);

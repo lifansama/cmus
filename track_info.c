@@ -74,6 +74,7 @@ void track_info_set_comments(struct track_info *ti, struct keyval *comments) {
 	ti->title = keyvals_get_val(comments, "title");
 	ti->tracknumber = comments_get_int(comments, "tracknumber");
 	ti->discnumber = comments_get_int(comments, "discnumber");
+	ti->totaldiscs = comments_get_int(comments, "totaldiscs");
 	ti->date = comments_get_date(comments, "date");
 	ti->originaldate = comments_get_date(comments, "originaldate");
 	ti->genre = keyvals_get_val(comments, "genre");
@@ -83,6 +84,11 @@ void track_info_set_comments(struct track_info *ti, struct keyval *comments) {
 	ti->albumsort = keyvals_get_val(comments, "albumsort");
 	ti->is_va_compilation = track_is_va_compilation(comments);
 	ti->media = keyvals_get_val(comments, "media");
+
+	const char *bitrate_str = keyvals_get_val(comments, "bitrate");
+	if (bitrate_str) {
+		ti->bitrate = strtol(bitrate_str, NULL, 10) * 1000;
+	}
 
 	int bpm = comments_get_int(comments, "bpm");
 	if (ti->bpm == 0 || ti->bpm == -1) {
@@ -105,11 +111,13 @@ void track_info_set_comments(struct track_info *ti, struct keyval *comments) {
 	ti->rg_album_peak = comments_get_double(comments, "replaygain_album_peak");
 
 	if (comments_get_signed_int(comments, "r128_track_gain", &r128_track_gain) != -1) {
-		ti->rg_track_gain = (r128_track_gain / 256.0) + 5;
+		double rg = (r128_track_gain / 256.0) + 5;
+		ti->rg_track_gain = round(rg * 100) / 100.0;
 	}
 
 	if (comments_get_signed_int(comments, "r128_album_gain", &r128_album_gain) != -1) {
-		ti->rg_album_gain = (r128_album_gain / 256.0) + 5;
+		double rg = (r128_album_gain / 256.0) + 5;
+		ti->rg_album_gain = round(rg * 100) / 100.0;
 	}
 
 	if (comments_get_signed_int(comments, "output_gain", &output_gain) != -1) {
@@ -188,8 +196,8 @@ int track_info_matches_full(const struct track_info *ti, const char *text,
 		const char *word = words[i];
 
 		matched = 0;
-		if (flags_set(ti, flags) && match_word(ti, word, flags)) {
-			matched = 1;
+		if (flags_set(ti, flags)) {
+			matched = match_word(ti, word, flags);
 		} else {
 			/* compare with url or filename without path */
 			const char *filename = ti->filename;
@@ -201,7 +209,7 @@ int track_info_matches_full(const struct track_info *ti, const char *text,
 				matched = 1;
 		}
 
-		if (flags_set(ti, exclude_flags) && match_word(ti, word, exclude_flags))
+		if (match_word(ti, word, exclude_flags))
 			matched = 0;
 
 		if (match_all_words ? !matched : matched)
@@ -246,10 +254,12 @@ int track_info_cmp(const struct track_info *a, const struct track_info *b, const
 		switch (key) {
 		case SORT_TRACKNUMBER:
 		case SORT_DISCNUMBER:
+		case SORT_TOTALDISCS:
 		case SORT_DATE:
 		case SORT_ORIGINALDATE:
 		case SORT_PLAY_COUNT:
 		case SORT_BPM:
+		case SORT_DURATION:
 			res = getentry(a, key, int) - getentry(b, key, int);
 			break;
 		case SORT_FILEMTIME:
@@ -289,8 +299,10 @@ static const struct {
 	{ "album",		SORT_ALBUM		},
 	{ "title",		SORT_TITLE		},
 	{ "play_count",		SORT_PLAY_COUNT		},
+	{ "duration",		SORT_DURATION		},
 	{ "tracknumber",	SORT_TRACKNUMBER	},
 	{ "discnumber",		SORT_DISCNUMBER		},
+	{ "totaldiscs",		SORT_TOTALDISCS		},
 	{ "date",		SORT_DATE		},
 	{ "originaldate",	SORT_ORIGINALDATE	},
 	{ "genre",		SORT_GENRE		},
@@ -311,8 +323,10 @@ static const struct {
 	{ "-album",		REV_SORT_ALBUM		},
 	{ "-title",		REV_SORT_TITLE		},
 	{ "-play_count", 	REV_SORT_PLAY_COUNT	},
+	{ "-duration",		REV_SORT_DURATION	},
 	{ "-tracknumber",	REV_SORT_TRACKNUMBER	},
 	{ "-discnumber",	REV_SORT_DISCNUMBER	},
+	{ "-totaldiscs",	REV_SORT_TOTALDISCS	},
 	{ "-date",		REV_SORT_DATE		},
 	{ "-originaldate",	REV_SORT_ORIGINALDATE	},
 	{ "-genre",		REV_SORT_GENRE		},

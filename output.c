@@ -124,8 +124,7 @@ void op_load_plugins(void)
 			error_msg("%s: missing symbol", filename);
 			err = true;
 		}
-		STATIC_ASSERT(OP_ABI_VERSION == 2);
-		if (!plug->abi_version_ptr || (*plug->abi_version_ptr != 1 && *plug->abi_version_ptr != 2)) {
+		if (!plug->abi_version_ptr || *plug->abi_version_ptr != OP_ABI_VERSION) {
 			error_msg("%s: incompatible plugin version", filename);
 			err = true;
 		}
@@ -381,7 +380,7 @@ static void set_mixer_option(void *data, const char *val)
 		/* option of the current op was set
 		 * try to reopen the mixer */
 		mixer_close();
-		if (!soft_vol)
+		if (!soft_vol || pause_on_output_change)
 			mixer_open();
 	}
 }
